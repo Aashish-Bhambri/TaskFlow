@@ -1,0 +1,10 @@
+node_modules
+.git
+.gitignore
+.env
+.env.local
+.gemini
+dist
+dist-frontend
+*.log
+.DS_Store

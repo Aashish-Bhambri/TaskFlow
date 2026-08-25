@@ -1,0 +1,268 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// -------------------------------------------------------------
+// 1. SaaS Multi-Tenancy & Security Layer
+// -------------------------------------------------------------
+
+enum PlanTier {
+  FREE
+  STARTER
+  PRO
+  ENTERPRISE
+}
+
+enum Role {
+  ADMIN
+  PROJECT_LEAD
+  CONTRIBUTOR
+  VIEWER
+}
+
+model Organization {
+  id          String      @id @default(uuid())
+  name        String
+  slug        String      @unique
+  plan        PlanTier    @default(FREE)
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  users       User[]
+  workspaces  Workspace[]
+  apiKeys     ApiKey[]
+  tasks       Task[]
+  webhooks    Webhook[]
+  sprints     Sprint[]
+}
+
+model ApiKey {
+  id              String       @id @default(uuid())
+  name            String       @default("Default Key")
+  keyHash         String       @unique
+  prefix          String
+  organizationId  String
+  organization    Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  lastUsedAt      DateTime?
+  expiresAt       DateTime?
+  createdAt       DateTime     @default(now())
+}
+
+model Workspace {
+  id              String       @id @default(uuid())
+  name            String
+  slug            String?
+  description     String?
+  organizationId  String
+  organization    Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  
+  projects        Project[]
+  tasks           Task[]
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+}
+
+// -------------------------------------------------------------
+// 2. Projects & Sprints
+// -------------------------------------------------------------
+
+model Project {
+  id          String      @id @default(uuid())
+  name        String
+  description String?
+  priority    Priority    @default(MEDIUM)
+  status      String      @default("ACTIVE")
+  progress    Int         @default(0)
+  startDate   DateTime?
+  endDate     DateTime?
+  
+  workspaceId String
+  workspace   Workspace   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  teamLeadId  String?
+  teamLead    User?       @relation("TeamLeadProjects", fields: [teamLeadId], references: [id], onDelete: SetNull)
+  members     User[]      @relation("ProjectMembers")
+  tasks       Task[]
+
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+}
+
+model Sprint {
+  id              String       @id @default(uuid())
+  name            String
+  goal            String?
+  startDate       DateTime?
+  endDate         DateTime?
+  status          String       @default("ACTIVE")
+  organizationId  String
+  organization    Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  
+  tasks           Task[]
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+}
+
+// -------------------------------------------------------------
+// 3. User & Core Tasks
+// -------------------------------------------------------------
+
+model User {
+  id             String       @id @default(uuid())
+  email          String       @unique
+  name           String?
+  image          String?
+  role           Role         @default(CONTRIBUTOR)
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  createdTasks   Task[]       @relation("CreatedTasks")
+  assignedTasks  Task[]       @relation("AssignedTasks")
+  leadProjects   Project[]    @relation("TeamLeadProjects")
+  projects       Project[]    @relation("ProjectMembers")
+  notifications  Notification[]
+  comments       Comment[]
+  activityLogs   ActivityLog[]
+
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+}
+
+enum TaskStatus {
+  BACKLOG
+  TODO
+  IN_PROGRESS
+  REVIEW
+  BLOCKED
+  DONE
+}
+
+enum Priority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum TaskType {
+  FEATURE
+  BUG
+  TASK
+  IMPROVEMENT
+  OTHER
+}
+
+model Task {
+  id             String       @id @default(uuid())
+  title          String
+  description    String?
+  status         TaskStatus   @default(BACKLOG)
+  priority       Priority     @default(MEDIUM)
+  type           TaskType     @default(TASK)
+  estimatedHours Float?
+  dueDate        DateTime?
+
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  workspaceId    String?
+  workspace      Workspace?   @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
+
+  projectId      String?
+  project        Project?     @relation(fields: [projectId], references: [id], onDelete: SetNull)
+
+  sprintId       String?
+  sprint         Sprint?      @relation(fields: [sprintId], references: [id], onDelete: SetNull)
+
+  assigneeId     String?
+  assignee       User?        @relation("AssignedTasks", fields: [assigneeId], references: [id], onDelete: SetNull)
+
+  createdById    String
+  createdBy      User         @relation("CreatedTasks", fields: [createdById], references: [id], onDelete: Cascade)
+
+  dependencies   TaskDependency[] @relation("TaskRequires")
+  blockedTasks   TaskDependency[] @relation("TaskBlocks")
+  notifications  Notification[]
+  comments       Comment[]
+  activityLogs   ActivityLog[]
+
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@index([organizationId, status])
+  @@index([projectId, status])
+  @@index([assigneeId])
+}
+
+// -------------------------------------------------------------
+// 4. DAG Dependencies, Comments & Activity Logs
+// -------------------------------------------------------------
+
+model TaskDependency {
+  taskId          String
+  dependsOnTaskId String
+
+  task            Task         @relation("TaskRequires", fields: [taskId], references: [id], onDelete: Cascade)
+  dependsOnTask   Task         @relation("TaskBlocks", fields: [dependsOnTaskId], references: [id], onDelete: Cascade)
+
+  createdAt       DateTime     @default(now())
+
+  @@id([taskId, dependsOnTaskId])
+}
+
+model Comment {
+  id        String    @id @default(uuid())
+  content   String
+  taskId    String
+  task      Task      @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@index([taskId])
+}
+
+model ActivityLog {
+  id        String    @id @default(uuid())
+  action    String
+  details   String?
+  taskId    String
+  task      Task      @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime  @default(now())
+
+  @@index([taskId])
+}
+
+model Notification {
+  id        String    @id @default(uuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  taskId    String?
+  task      Task?     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  message   String
+  read      Boolean   @default(false)
+  createdAt DateTime  @default(now())
+}
+
+model Webhook {
+  id              String       @id @default(uuid())
+  url             String
+  events          String[]
+  secret          String?
+  organizationId  String
+  organization    Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  active          Boolean      @default(true)
+  createdAt       DateTime     @default(now())
+}
