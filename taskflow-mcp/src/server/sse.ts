@@ -549,16 +549,14 @@ app.post('/mcp/messages', async (req: Request, res: Response) => {
 });
 
 // React Router SPA fallback (all non-API routes serve index.html)
-app.get('*', (req: Request, res: Response, next) => {
-  if (req.path.startsWith('/api') || req.path.startsWith('/mcp') || req.path.startsWith('/health')) {
-    return next();
+app.use((req: Request, res: Response, next) => {
+  if (req.method === 'GET' && !req.path.startsWith('/api') && !req.path.startsWith('/mcp') && !req.path.startsWith('/health')) {
+    const indexPath = path.join(activeFrontendDir, 'index.html');
+    if (fs.existsSync(indexPath)) {
+      return res.sendFile(indexPath);
+    }
   }
-  const indexPath = path.join(activeFrontendDir, 'index.html');
-  if (fs.existsSync(indexPath)) {
-    res.sendFile(indexPath);
-  } else {
-    next();
-  }
+  next();
 });
 
 export function startSseServer(port: number = Number(process.env.PORT) || 3000) {
