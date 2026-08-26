@@ -520,7 +520,11 @@ app.get('/mcp/sse', async (req: Request, res: Response) => {
     return res.status(403).json({ error: 'Forbidden: Invalid or expired API Key' });
   }
 
-  const transport = new SSEServerTransport('/mcp/messages', res);
+  const host = req.headers['x-forwarded-host'] || req.headers.host;
+  const proto = req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http');
+  const endpoint = host ? `${proto}://${host}/mcp/messages` : '/mcp/messages';
+
+  const transport = new SSEServerTransport(endpoint, res);
   transports.set(transport.sessionId, transport);
 
   transport.onclose = () => {

@@ -60,10 +60,7 @@ export default function DeveloperApiKeysDialog({ onClose }) {
     {
       mcpServers: {
         taskflow: {
-          url: sseUrl,
-          headers: {
-            Authorization: `Bearer ${activeKey}`
-          }
+          url: `${sseUrl}?apiKey=${activeKey}`
         }
       }
     },
