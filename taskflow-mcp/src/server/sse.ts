@@ -25,6 +25,36 @@ const possibleFrontendPaths = [
 let activeFrontendDir = possibleFrontendPaths.find(p => fs.existsSync(p)) || path.join(process.cwd(), 'public');
 app.use(express.static(activeFrontendDir));
 
+// Custom Cloud SSE Transport that preserves the full absolute URL
+class CloudSSEServerTransport extends SSEServerTransport {
+  private _fullOrigin: string;
+
+  constructor(endpoint: string, res: Response, fullOrigin: string) {
+    super(endpoint, res);
+    this._fullOrigin = fullOrigin;
+  }
+
+  async start() {
+    if ((this as any)._sseResponse) {
+      throw new Error('SSEServerTransport already started!');
+    }
+    this.res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
+      'Access-Control-Allow-Origin': '*'
+    });
+
+    const fullEndpointUrl = `${this._fullOrigin}/mcp/messages?sessionId=${this.sessionId}`;
+    this.res.write(`event: endpoint\ndata: ${fullEndpointUrl}\n\n`);
+    (this as any)._sseResponse = this.res;
+    this.res.on('close', () => {
+      (this as any)._sseResponse = undefined;
+      this.onclose?.();
+    });
+  }
+}
+
 // Map to track active SSE transports by sessionId
 const transports = new Map<string, SSEServerTransport>();
 
@@ -96,9 +126,6 @@ async function getUserContext(req: Request) {
 // REST API ENDPOINTS (Multi-Tenant User Isolated)
 // =========================================================================
 
-/**
- * GET /api/v1/workspaces - Fetch workspaces for current signed-in user
- */
 app.get('/api/v1/workspaces', async (req: Request, res: Response) => {
   try {
     const ctx = await getUserContext(req);
@@ -123,9 +150,6 @@ app.get('/api/v1/workspaces', async (req: Request, res: Response) => {
   }
 });
 
-/**
- * POST /api/v1/workspaces - Create Workspace for user
- */
 app.post('/api/v1/workspaces', async (req: Request, res: Response) => {
   try {
     const ctx = await getUserContext(req);
@@ -148,9 +172,6 @@ app.post('/api/v1/workspaces', async (req: Request, res: Response) => {
   }
 });
 
-/**
- * GET /api/v1/projects - Fetch projects for user's organization
- */
 app.get('/api/v1/projects', async (req: Request, res: Response) => {
   try {
     const ctx = await getUserContext(req);
@@ -182,9 +203,6 @@ app.get('/api/v1/projects', async (req: Request, res: Response) => {
   }
 });
 
-/**
- * GET /api/v1/projects/:id - Fetch single project details
- */
 app.get('/api/v1/projects/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
@@ -209,9 +227,6 @@ app.get('/api/v1/projects/:id', async (req: Request, res: Response) => {
   }
 });
 
-/**
- * POST /api/v1/projects - Create new project
- */
 app.post('/api/v1/projects', async (req: Request, res: Response) => {
   try {
     const ctx = await getUserContext(req);
@@ -242,9 +257,6 @@ app.post('/api/v1/projects', async (req: Request, res: Response) => {
   }
 });
 
-/**
- * GET /api/v1/dashboard/stats - Dashboard Metrics for logged in user
- */
 app.get('/api/v1/dashboard/stats', async (req: Request, res: Response) => {
   try {
     const ctx = await getUserContext(req);
@@ -296,9 +308,6 @@ app.get('/api/v1/dashboard/stats', async (req: Request, res: Response) => {
   }
 });
 
-/**
- * GET /api/v1/tasks - Fetch all tasks for user's organization
- */
 app.get('/api/v1/tasks', async (req: Request, res: Response) => {
   try {
     const ctx = await getUserContext(req);
@@ -328,9 +337,6 @@ app.get('/api/v1/tasks', async (req: Request, res: Response) => {
   }
 });
 
-/**
- * POST /api/v1/tasks - Create new task
- */
 app.post('/api/v1/tasks', async (req: Request, res: Response) => {
   try {
     const ctx = await getUserContext(req);
@@ -367,9 +373,6 @@ app.post('/api/v1/tasks', async (req: Request, res: Response) => {
   }
 });
 
-/**
- * PATCH /api/v1/tasks/:id/status - Move task status through State Machine
- */
 app.patch('/api/v1/tasks/:id/status', async (req: Request, res: Response) => {
   try {
     const ctx = await getUserContext(req);
@@ -388,9 +391,6 @@ app.patch('/api/v1/tasks/:id/status', async (req: Request, res: Response) => {
   }
 });
 
-/**
- * GET /api/v1/tasks/:id - Get task detail, comments & activity history
- */
 app.get('/api/v1/tasks/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
@@ -420,9 +420,6 @@ app.get('/api/v1/tasks/:id', async (req: Request, res: Response) => {
   }
 });
 
-/**
- * POST /api/v1/tasks/:id/comments - Add comment to task
- */
 app.post('/api/v1/tasks/:id/comments', async (req: Request, res: Response) => {
   try {
     const ctx = await getUserContext(req);
@@ -448,9 +445,6 @@ app.post('/api/v1/tasks/:id/comments', async (req: Request, res: Response) => {
   }
 });
 
-/**
- * GET /api/v1/calendar/:userId/feed.ics - iCal feed endpoint
- */
 app.get('/api/v1/calendar/:userId/feed.ics', async (req: Request, res: Response) => {
   try {
     const { userId } = req.params;
@@ -463,9 +457,6 @@ app.get('/api/v1/calendar/:userId/feed.ics', async (req: Request, res: Response)
   }
 });
 
-/**
- * GET /api/v1/events/stream & /api/v1/events/live - Real-time SSE Stream
- */
 const sseHandler = (req: Request, res: Response) => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
@@ -522,9 +513,10 @@ app.get('/mcp/sse', async (req: Request, res: Response) => {
 
   const host = req.headers['x-forwarded-host'] || req.headers.host;
   const proto = req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http');
-  const endpoint = host ? `${proto}://${host}/mcp/messages` : '/mcp/messages';
+  const fullOrigin = host ? `${proto}://${host}` : 'http://localhost:3000';
+  const endpoint = `${fullOrigin}/mcp/messages`;
 
-  const transport = new SSEServerTransport(endpoint, res);
+  const transport = new CloudSSEServerTransport(endpoint, res, fullOrigin);
   transports.set(transport.sessionId, transport);
 
   transport.onclose = () => {
