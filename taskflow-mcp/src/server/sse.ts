@@ -25,20 +25,22 @@ const possibleFrontendPaths = [
 let activeFrontendDir = possibleFrontendPaths.find(p => fs.existsSync(p)) || path.join(process.cwd(), 'public');
 app.use(express.static(activeFrontendDir));
 
-// Custom Cloud SSE Transport that preserves the full absolute URL
+// Custom Cloud SSE Transport that preserves the full absolute URL for remote IDE clients
 class CloudSSEServerTransport extends SSEServerTransport {
   private _fullOrigin: string;
+  private _httpRes: Response;
 
   constructor(endpoint: string, res: Response, fullOrigin: string) {
     super(endpoint, res);
     this._fullOrigin = fullOrigin;
+    this._httpRes = res;
   }
 
   async start() {
     if ((this as any)._sseResponse) {
       throw new Error('SSEServerTransport already started!');
     }
-    this.res.writeHead(200, {
+    this._httpRes.writeHead(200, {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache, no-transform',
       Connection: 'keep-alive',
@@ -46,9 +48,9 @@ class CloudSSEServerTransport extends SSEServerTransport {
     });
 
     const fullEndpointUrl = `${this._fullOrigin}/mcp/messages?sessionId=${this.sessionId}`;
-    this.res.write(`event: endpoint\ndata: ${fullEndpointUrl}\n\n`);
-    (this as any)._sseResponse = this.res;
-    this.res.on('close', () => {
+    this._httpRes.write(`event: endpoint\ndata: ${fullEndpointUrl}\n\n`);
+    (this as any)._sseResponse = this._httpRes;
+    this._httpRes.on('close', () => {
       (this as any)._sseResponse = undefined;
       this.onclose?.();
     });
@@ -205,7 +207,7 @@ app.get('/api/v1/projects', async (req: Request, res: Response) => {
 
 app.get('/api/v1/projects/:id', async (req: Request, res: Response) => {
   try {
-    const { id } = req.params;
+    const id = req.params.id as string;
     const project = await prisma.project.findUnique({
       where: { id },
       include: {
@@ -378,7 +380,7 @@ app.patch('/api/v1/tasks/:id/status', async (req: Request, res: Response) => {
     const ctx = await getUserContext(req);
     if (!ctx) return res.status(401).json({ error: 'Unauthorized: User not signed in' });
 
-    const { id } = req.params;
+    const id = req.params.id as string;
     const { newStatus, status } = req.body;
     const targetStatus = (newStatus || status) as TaskStatus;
 
@@ -393,7 +395,7 @@ app.patch('/api/v1/tasks/:id/status', async (req: Request, res: Response) => {
 
 app.get('/api/v1/tasks/:id', async (req: Request, res: Response) => {
   try {
-    const { id } = req.params;
+    const id = req.params.id as string;
     const task = await prisma.task.findUnique({
       where: { id },
       include: {
@@ -425,7 +427,7 @@ app.post('/api/v1/tasks/:id/comments', async (req: Request, res: Response) => {
     const ctx = await getUserContext(req);
     if (!ctx) return res.status(401).json({ error: 'Unauthorized: User not signed in' });
 
-    const { id } = req.params;
+    const id = req.params.id as string;
     const { content } = req.body;
 
     const comment = await prisma.comment.create({
@@ -447,7 +449,7 @@ app.post('/api/v1/tasks/:id/comments', async (req: Request, res: Response) => {
 
 app.get('/api/v1/calendar/:userId/feed.ics', async (req: Request, res: Response) => {
   try {
-    const { userId } = req.params;
+    const userId = req.params.userId as string;
     const icsString = await generateUserCalendarFeed(userId);
     res.setHeader('Content-Type', 'text/calendar; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="taskflow-schedule.ics"`);

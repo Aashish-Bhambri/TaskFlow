@@ -195,7 +195,7 @@ apiRouter.get('/projects', async (req: Request, res: Response) => {
 apiRouter.get('/projects/:id', async (req: Request, res: Response) => {
   try {
     const project = await prisma.project.findUnique({
-      where: { id: req.params.id },
+      where: { id: req.params.id as string },
       include: {
         teamLead: true,
         members: true,
@@ -258,7 +258,7 @@ apiRouter.patch('/projects/:id', async (req: Request, res: Response) => {
     const { name, description, priority, status, progress, start_date, end_date } = req.body;
 
     const updated = await prisma.project.update({
-      where: { id: req.params.id },
+      where: { id: req.params.id as string },
       data: {
         ...(name !== undefined ? { name } : {}),
         ...(description !== undefined ? { description } : {}),
@@ -285,7 +285,7 @@ apiRouter.post('/projects/:id/members', async (req: Request, res: Response) => {
   try {
     const { userId } = req.body;
     const project = await prisma.project.update({
-      where: { id: req.params.id },
+      where: { id: req.params.id as string },
       data: {
         members: { connect: { id: userId } },
       },
@@ -333,7 +333,7 @@ apiRouter.get('/tasks', async (req: Request, res: Response) => {
 apiRouter.get('/tasks/:id', async (req: Request, res: Response) => {
   try {
     const task = await prisma.task.findUnique({
-      where: { id: req.params.id },
+      where: { id: req.params.id as string },
       include: {
         assignee: true,
         project: true,
@@ -411,7 +411,7 @@ apiRouter.patch('/tasks/:id/status', async (req: Request, res: Response) => {
     if (!newStatus) return res.status(400).json({ error: 'newStatus is required' });
 
     // Enforce DAG state machine validation
-    const updated = await transitionTaskStatus(req.params.id, newStatus as TaskStatus);
+    const updated = await transitionTaskStatus(req.params.id as string, newStatus as TaskStatus);
 
     broadcastEvent('TASK_STATUS_UPDATED', { taskId: updated.id, status: updated.status });
     res.json(updated);
@@ -426,7 +426,7 @@ apiRouter.patch('/tasks/:id', async (req: Request, res: Response) => {
     const { title, description, priority, type, estimatedHours, dueDate, assigneeId } = req.body;
 
     const updated = await prisma.task.update({
-      where: { id: req.params.id },
+      where: { id: req.params.id as string },
       data: {
         ...(title !== undefined ? { title } : {}),
         ...(description !== undefined ? { description } : {}),
@@ -483,14 +483,14 @@ apiRouter.post('/tasks/:id/comments', async (req: Request, res: Response) => {
 
     const comment = await prisma.comment.create({
       data: {
-        taskId: req.params.id,
+        taskId: req.params.id as string,
         userId: authorId,
         content: content.trim(),
       },
       include: { user: true },
     });
 
-    broadcastEvent('COMMENT_ADDED', { taskId: req.params.id, comment });
+    broadcastEvent('COMMENT_ADDED', { taskId: req.params.id as string, comment });
     res.status(201).json(comment);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -502,7 +502,7 @@ apiRouter.post('/tasks/:id/comments', async (req: Request, res: Response) => {
 // -------------------------------------------------------------
 apiRouter.get('/calendar/:userId/feed.ics', async (req: Request, res: Response) => {
   try {
-    const icsContent = await generateUserCalendarFeed(req.params.userId);
+    const icsContent = await generateUserCalendarFeed(req.params.userId as string);
     res.setHeader('Content-Type', 'text/calendar; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="taskflow-schedule.ics"`);
     res.send(icsContent);
