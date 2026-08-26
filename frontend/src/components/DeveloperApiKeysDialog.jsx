@@ -60,6 +60,7 @@ export default function DeveloperApiKeysDialog({ onClose }) {
     {
       mcpServers: {
         taskflow: {
+          serverUrl: `${sseUrl}?apiKey=${activeKey}`,
           url: `${sseUrl}?apiKey=${activeKey}`
         }
       }
