@@ -25,6 +25,7 @@ enum PlanTier {
 enum Role {
   ADMIN
   PROJECT_LEAD
+  PROJECT_MANAGER
   CONTRIBUTOR
   VIEWER
 }
@@ -52,6 +53,8 @@ model ApiKey {
   prefix          String
   organizationId  String
   organization    Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  userId          String?
+  user            User?        @relation(fields: [userId], references: [id], onDelete: Cascade)
   lastUsedAt      DateTime?
   expiresAt       DateTime?
   createdAt       DateTime     @default(now())
@@ -125,6 +128,7 @@ model User {
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 
+  apiKeys        ApiKey[]
   createdTasks   Task[]       @relation("CreatedTasks")
   assignedTasks  Task[]       @relation("AssignedTasks")
   leadProjects   Project[]    @relation("TeamLeadProjects")

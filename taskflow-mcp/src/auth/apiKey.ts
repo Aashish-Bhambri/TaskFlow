@@ -4,6 +4,9 @@ import { prisma } from '../db.js';
 export interface AuthContext {
   organizationId: string;
   organizationName: string;
+  userId?: string;
+  userName?: string;
+  userEmail?: string;
   apiKeyId: string;
 }
 
@@ -15,9 +18,9 @@ export function hashApiKey(key: string): string {
 }
 
 /**
- * Generates a new live API key for an organization (e.g. tf_live_...).
+ * Generates a new live API key bound to a specific user and organization (e.g. tf_live_...).
  */
-export async function createApiKey(organizationId: string, name: string = 'Default Key') {
+export async function createApiKey(organizationId: string, userId?: string, name: string = 'Default Key') {
   const rawKeyBytes = crypto.randomBytes(24).toString('hex');
   const apiKey = `tf_live_${rawKeyBytes}`;
   const keyHash = hashApiKey(apiKey);
@@ -29,6 +32,7 @@ export async function createApiKey(organizationId: string, name: string = 'Defau
       keyHash,
       prefix,
       organizationId,
+      userId: userId || undefined
     }
   });
 
@@ -37,11 +41,13 @@ export async function createApiKey(organizationId: string, name: string = 'Defau
     apiKey, // Only returned once upon creation
     prefix,
     name: record.name,
+    userId: record.userId,
+    organizationId: record.organizationId
   };
 }
 
 /**
- * Validates a raw Bearer token against stored API key hashes.
+ * Validates a raw Bearer token against stored API key hashes and returns full tenant/user context.
  */
 export async function validateApiKey(rawKey: string): Promise<AuthContext | null> {
   if (!rawKey || !rawKey.startsWith('tf_live_')) {
@@ -51,7 +57,7 @@ export async function validateApiKey(rawKey: string): Promise<AuthContext | null
   const keyHash = hashApiKey(rawKey);
   const apiKeyRecord = await prisma.apiKey.findUnique({
     where: { keyHash },
-    include: { organization: true }
+    include: { organization: true, user: true }
   });
 
   if (!apiKeyRecord) {
@@ -67,6 +73,9 @@ export async function validateApiKey(rawKey: string): Promise<AuthContext | null
   return {
     organizationId: apiKeyRecord.organizationId,
     organizationName: apiKeyRecord.organization.name,
+    userId: apiKeyRecord.userId || apiKeyRecord.user?.id,
+    userName: apiKeyRecord.user?.name || undefined,
+    userEmail: apiKeyRecord.user?.email || undefined,
     apiKeyId: apiKeyRecord.id,
   };
 }

@@ -32,7 +32,7 @@ export function broadcastLiveEvent(eventType: string, data: any) {
 async function dispatchWebhooks(organizationId: string, eventType: string, payload: any) {
   try {
     const webhooks = await prisma.webhook.findMany({
-      where: { organizationId, isActive: true }
+      where: { organizationId, active: true }
     });
 
     for (const webhook of webhooks) {

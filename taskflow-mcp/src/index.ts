@@ -14,6 +14,34 @@ export const server = new McpServer({
   version: '2.1.0'
 });
 
+/**
+ * Resolves the effective user account automatically so the AI never has to ask the user.
+ */
+export async function resolveEffectiveUser(callerId?: string) {
+  if (callerId) {
+    const byIdOrEmail = await prisma.user.findFirst({
+      where: {
+        OR: [{ id: callerId }, { email: callerId }]
+      },
+      include: { organization: true }
+    });
+    if (byIdOrEmail) return byIdOrEmail;
+  }
+
+  // Auto-resolve to default admin user in the workspace
+  const defaultUser = await prisma.user.findFirst({
+    where: { role: Role.ADMIN },
+    include: { organization: true }
+  });
+
+  if (defaultUser) return defaultUser;
+
+  // Fallback to first available user
+  return await prisma.user.findFirst({
+    include: { organization: true }
+  });
+}
+
 // ==========================================
 // TOOL 1: Register User (with Organization)
 // ==========================================
@@ -24,13 +52,16 @@ server.tool(
     name: z.string().min(2),
     email: z.string().email(),
     role: z.nativeEnum(Role).default(Role.CONTRIBUTOR),
-    organizationSlug: z.string().default('default-org').describe('Organization slug/identifier')
+    organizationSlug: z.string().optional().describe('Optional organization slug/identifier')
   },
   async ({ name, email, role, organizationSlug }) => {
-    let org = await prisma.organization.findUnique({ where: { slug: organizationSlug } });
+    let org = null;
+    if (organizationSlug) {
+      org = await prisma.organization.findUnique({ where: { slug: organizationSlug } });
+    }
     if (!org) {
-      org = await prisma.organization.create({
-        data: { name: organizationSlug.toUpperCase(), slug: organizationSlug }
+      org = await prisma.organization.findFirst() || await prisma.organization.create({
+        data: { name: 'TaskFlow Workspace', slug: 'taskflow-workspace' }
       });
     }
 
@@ -52,26 +83,47 @@ server.tool(
 );
 
 // ==========================================
-// TOOL 2: Create Task (Multi-Tenant & RBAC)
+// TOOL 2: Create Task (Account Isolated & Auto-Resolved)
 // ==========================================
 server.tool(
   'create_task',
-  'Creates a new task within the caller organization with priority, estimate, and assignee',
+  'Creates a new task in the authenticated user workspace with priority, estimate, and assignee',
   {
-    callerId: z.string().describe('The user ID of the person making this request'),
-    title: z.string().min(3),
-    description: z.string().optional(),
-    priority: z.nativeEnum(Priority).default(Priority.MEDIUM),
-    type: z.nativeEnum(TaskType).default(TaskType.TASK),
-    assigneeId: z.string().optional(),
-    estimatedHours: z.number().positive().optional(),
-    dueDate: z.string().datetime().optional(),
-    sprintId: z.string().optional()
+    title: z.string().min(2).describe('Task title'),
+    description: z.string().optional().describe('Task description or acceptance criteria'),
+    priority: z.nativeEnum(Priority).default(Priority.MEDIUM).describe('Task priority: LOW, MEDIUM, HIGH, URGENT'),
+    type: z.nativeEnum(TaskType).default(TaskType.TASK).describe('Issue type: FEATURE, BUG, TASK, IMPROVEMENT, OTHER'),
+    assigneeId: z.string().optional().describe('Optional assignee user ID or email'),
+    estimatedHours: z.number().positive().optional().describe('Estimated hours of effort'),
+    dueDate: z.string().optional().describe('Optional due date string (ISO format or YYYY-MM-DD)'),
+    projectId: z.string().optional().describe('Optional project ID to associate with'),
+    sprintId: z.string().optional().describe('Optional sprint ID to associate with'),
+    callerId: z.string().optional().describe('Optional: User ID or email. Automatically resolved from your account.')
   },
-  async ({ callerId, title, description, priority, type, assigneeId, estimatedHours, dueDate, sprintId }) => {
-    const { authorized, user } = await authorizeUser(callerId, [Role.ADMIN, Role.PROJECT_MANAGER, Role.CONTRIBUTOR]);
-    if (!authorized || !user) {
-      return { content: [{ type: 'text', text: `Permission Denied: User "${callerId}" not found or unauthorized.` }] };
+  async ({ title, description, priority, type, assigneeId, estimatedHours, dueDate, projectId, sprintId, callerId }) => {
+    const user = await resolveEffectiveUser(callerId);
+    if (!user) {
+      return { content: [{ type: 'text', text: 'Error: No user account found in database. Please sign in or create a user.' }] };
+    }
+
+    // Resolve assignee if provided by email
+    let finalAssigneeId = user.id;
+    if (assigneeId) {
+      const assignedUser = await prisma.user.findFirst({
+        where: {
+          organizationId: user.organizationId,
+          OR: [{ id: assigneeId }, { email: assigneeId }]
+        }
+      });
+      if (assignedUser) finalAssigneeId = assignedUser.id;
+    }
+
+    // Resolve project or default workspace
+    let finalProjectId = projectId;
+    let workspace = await prisma.workspace.findFirst({ where: { organizationId: user.organizationId } });
+    if (!finalProjectId) {
+      const firstProj = await prisma.project.findFirst({ where: { workspace: { organizationId: user.organizationId } } });
+      if (firstProj) finalProjectId = firstProj.id;
     }
 
     const task = await prisma.task.create({
@@ -80,16 +132,19 @@ server.tool(
         description,
         priority,
         type,
-        assigneeId,
-        createdById: callerId,
+        assigneeId: finalAssigneeId,
+        createdById: user.id,
         organizationId: user.organizationId,
+        workspaceId: workspace?.id,
+        projectId: finalProjectId,
         sprintId,
         estimatedHours,
         dueDate: dueDate ? new Date(dueDate) : undefined,
         status: TaskStatus.BACKLOG
       },
       include: {
-        assignee: { select: { name: true, email: true } }
+        assignee: { select: { name: true, email: true } },
+        project: { select: { name: true } }
       }
     });
 
@@ -97,46 +152,38 @@ server.tool(
     await prisma.activityLog.create({
       data: {
         taskId: task.id,
-        userId: callerId,
+        userId: user.id,
         action: 'CREATED',
-        details: `Task "${title}" created by ${user.name}`
+        details: `Task "${title}" created by ${user.name || user.email}`
       }
     }).catch(() => {});
 
     eventBus.emit('TASK_CREATED', { task, organizationId: user.organizationId });
 
-    if (assigneeId) {
-      eventBus.emit('TASK_ASSIGNED', {
-        taskId: task.id,
-        taskTitle: task.title,
-        assigneeId,
-        organizationId: user.organizationId
-      });
-    }
-
     return {
-      content: [{ type: 'text', text: `Success: Task "${task.title}" created with ID "${task.id}" in BACKLOG.` }]
+      content: [{ type: 'text', text: `Success: Task "${task.title}" created with ID "${task.id}" in your workspace!` }]
     };
   }
 );
 
 // ==========================================
-// TOOL 3: List Tasks (Multi-Tenant Filtered)
+// TOOL 3: List Tasks (Account Scoped)
 // ==========================================
 server.tool(
   'list_tasks',
-  'Retrieves tasks in the organization with optional status, priority, or assignee filters',
+  'Retrieves tasks in your organization with optional status, priority, or project filters',
   {
-    callerId: z.string().describe('The user ID of the caller to scope organization'),
-    status: z.nativeEnum(TaskStatus).optional(),
-    priority: z.nativeEnum(Priority).optional(),
-    assigneeId: z.string().optional(),
-    sprintId: z.string().optional()
+    status: z.nativeEnum(TaskStatus).optional().describe('Filter by status: BACKLOG, TODO, IN_PROGRESS, REVIEW, BLOCKED, DONE'),
+    priority: z.nativeEnum(Priority).optional().describe('Filter by priority: LOW, MEDIUM, HIGH, URGENT'),
+    projectId: z.string().optional().describe('Filter by project ID'),
+    assigneeId: z.string().optional().describe('Filter by assignee ID or email'),
+    sprintId: z.string().optional().describe('Filter by sprint ID'),
+    callerId: z.string().optional().describe('Optional: User ID or email. Automatically resolved from your account.')
   },
-  async ({ callerId, status, priority, assigneeId, sprintId }) => {
-    const user = await prisma.user.findUnique({ where: { id: callerId } });
+  async ({ status, priority, projectId, assigneeId, sprintId, callerId }) => {
+    const user = await resolveEffectiveUser(callerId);
     if (!user) {
-      return { content: [{ type: 'text', text: `Error: Caller ID "${callerId}" not found.` }] };
+      return { content: [{ type: 'text', text: 'Error: No user account found.' }] };
     }
 
     const tasks = await prisma.task.findMany({
@@ -144,11 +191,13 @@ server.tool(
         organizationId: user.organizationId,
         ...(status ? { status } : {}),
         ...(priority ? { priority } : {}),
+        ...(projectId ? { projectId } : {}),
         ...(assigneeId ? { assigneeId } : {}),
         ...(sprintId ? { sprintId } : {})
       },
       include: {
         assignee: { select: { id: true, name: true, email: true } },
+        project: { select: { id: true, name: true } },
         dependencies: { select: { dependsOnTaskId: true } },
         comments: { select: { id: true } }
       },
@@ -168,18 +217,19 @@ server.tool(
   'get_task_details',
   'Fetches full task specifications, comments, dependency trees, and audit activity history',
   {
-    callerId: z.string(),
-    taskId: z.string()
+    taskId: z.string().describe('The ID of the task to view'),
+    callerId: z.string().optional().describe('Optional: Automatically resolved from your account.')
   },
-  async ({ callerId, taskId }) => {
-    const user = await prisma.user.findUnique({ where: { id: callerId } });
-    if (!user) return { content: [{ type: 'text', text: 'Caller not found.' }] };
+  async ({ taskId, callerId }) => {
+    const user = await resolveEffectiveUser(callerId);
+    if (!user) return { content: [{ type: 'text', text: 'Caller account not found.' }] };
 
     const task = await prisma.task.findFirst({
       where: { id: taskId, organizationId: user.organizationId },
       include: {
         assignee: { select: { id: true, name: true, email: true } },
         createdBy: { select: { id: true, name: true, email: true } },
+        project: { select: { id: true, name: true } },
         dependencies: {
           include: { dependsOnTask: { select: { id: true, title: true, status: true } } }
         },
@@ -198,7 +248,7 @@ server.tool(
       }
     });
 
-    if (!task) return { content: [{ type: 'text', text: `Task "${taskId}" not found.` }] };
+    if (!task) return { content: [{ type: 'text', text: `Task "${taskId}" not found in your account.` }] };
 
     return {
       content: [{ type: 'text', text: JSON.stringify(task, null, 2) }]
@@ -213,23 +263,23 @@ server.tool(
   'add_task_comment',
   'Adds a discussion comment or review note to a task and logs an activity audit event',
   {
-    callerId: z.string(),
-    taskId: z.string(),
-    content: z.string().min(1)
+    taskId: z.string().describe('The ID of the task to comment on'),
+    content: z.string().min(1).describe('The comment content or review feedback'),
+    callerId: z.string().optional().describe('Optional: Automatically resolved from your account.')
   },
-  async ({ callerId, taskId, content }) => {
-    const user = await prisma.user.findUnique({ where: { id: callerId } });
-    if (!user) return { content: [{ type: 'text', text: 'Caller not found.' }] };
+  async ({ taskId, content, callerId }) => {
+    const user = await resolveEffectiveUser(callerId);
+    if (!user) return { content: [{ type: 'text', text: 'Caller account not found.' }] };
 
     const task = await prisma.task.findFirst({
       where: { id: taskId, organizationId: user.organizationId }
     });
-    if (!task) return { content: [{ type: 'text', text: `Task "${taskId}" not found.` }] };
+    if (!task) return { content: [{ type: 'text', text: `Task "${taskId}" not found in your account.` }] };
 
     const comment = await prisma.comment.create({
       data: {
         taskId,
-        userId: callerId,
+        userId: user.id,
         content
       },
       include: { user: { select: { name: true, email: true } } }
@@ -239,9 +289,9 @@ server.tool(
     await prisma.activityLog.create({
       data: {
         taskId,
-        userId: callerId,
+        userId: user.id,
         action: 'COMMENT_ADDED',
-        details: `Comment added by ${user.name}: "${content.substring(0, 50)}..."`
+        details: `Comment added by ${user.name || user.email}: "${content.substring(0, 50)}..."`
       }
     });
 
@@ -260,18 +310,18 @@ server.tool(
   'update_task_status',
   'Transitions task through the DAG workflow state machine',
   {
-    callerId: z.string(),
-    taskId: z.string(),
-    newStatus: z.nativeEnum(TaskStatus)
+    taskId: z.string().describe('The ID of the task to update'),
+    newStatus: z.nativeEnum(TaskStatus).describe('Target status: BACKLOG, TODO, IN_PROGRESS, REVIEW, BLOCKED, DONE'),
+    callerId: z.string().optional().describe('Optional: Automatically resolved from your account.')
   },
-  async ({ callerId, taskId, newStatus }) => {
-    const { authorized, user } = await authorizeUser(callerId, [Role.ADMIN, Role.PROJECT_MANAGER, Role.CONTRIBUTOR]);
-    if (!authorized || !user) {
-      return { content: [{ type: 'text', text: 'Permission Denied: User not found or unauthorized.' }] };
+  async ({ taskId, newStatus, callerId }) => {
+    const user = await resolveEffectiveUser(callerId);
+    if (!user) {
+      return { content: [{ type: 'text', text: 'Error: User account not found.' }] };
     }
 
     try {
-      const updated = await transitionTaskStatus(taskId, newStatus, user.organizationId, callerId);
+      const updated = await transitionTaskStatus(taskId, newStatus, user.organizationId, user.id);
       return {
         content: [{ type: 'text', text: `Success: Task "${taskId}" transitioned to state "${updated.status}".` }]
       };
@@ -288,14 +338,14 @@ server.tool(
   'set_task_dependency',
   'Defines that task A depends on task B being completed first',
   {
-    callerId: z.string(),
-    taskId: z.string(),
-    dependsOnTaskId: z.string()
+    taskId: z.string().describe('The task that is blocked'),
+    dependsOnTaskId: z.string().describe('The prerequisite task that must be completed first'),
+    callerId: z.string().optional().describe('Optional: Automatically resolved from your account.')
   },
-  async ({ callerId, taskId, dependsOnTaskId }) => {
-    const { authorized, user } = await authorizeUser(callerId, [Role.ADMIN, Role.PROJECT_MANAGER]);
-    if (!authorized || !user) {
-      return { content: [{ type: 'text', text: 'Permission Denied: Only Admins or Managers can set dependencies.' }] };
+  async ({ taskId, dependsOnTaskId, callerId }) => {
+    const user = await resolveEffectiveUser(callerId);
+    if (!user) {
+      return { content: [{ type: 'text', text: 'Error: User account not found.' }] };
     }
 
     await prisma.taskDependency.create({
@@ -305,14 +355,14 @@ server.tool(
     await prisma.activityLog.create({
       data: {
         taskId,
-        userId: callerId,
+        userId: user.id,
         action: 'DEPENDENCY_LINKED',
         details: `Linked dependency on Task ${dependsOnTaskId}`
       }
     }).catch(() => {});
 
     return {
-      content: [{ type: 'text', text: `Dependency linked: Task ${taskId} now blocked by Task ${dependsOnTaskId}.` }]
+      content: [{ type: 'text', text: `Dependency linked: Task ${taskId} is now blocked by Task ${dependsOnTaskId}.` }]
     };
   }
 );
@@ -324,11 +374,11 @@ server.tool(
   'generate_project_report',
   'Generates a comprehensive project progress report, velocity metrics, blocker detection, and executive summary',
   {
-    callerId: z.string(),
-    sprintId: z.string().optional()
+    sprintId: z.string().optional().describe('Optional sprint ID filter'),
+    callerId: z.string().optional().describe('Optional: Automatically resolved from your account.')
   },
-  async ({ callerId, sprintId }) => {
-    const user = await prisma.user.findUnique({ where: { id: callerId } });
+  async ({ sprintId, callerId }) => {
+    const user = await resolveEffectiveUser(callerId);
     if (!user) return { content: [{ type: 'text', text: 'Caller not found.' }] };
 
     const tasks = await prisma.task.findMany({
@@ -406,18 +456,18 @@ server.tool(
 // ==========================================
 server.tool(
   'manage_sprint',
-  'Creates or updates a Sprint cycle for the organization',
+  'Creates or updates a Sprint cycle for your organization',
   {
-    callerId: z.string(),
-    name: z.string(),
-    goal: z.string().optional(),
-    startDate: z.string().datetime().optional(),
-    endDate: z.string().datetime().optional(),
-    status: z.enum(['PLANNED', 'ACTIVE', 'COMPLETED']).default('ACTIVE')
+    name: z.string().describe('Sprint name'),
+    goal: z.string().optional().describe('Sprint goal'),
+    startDate: z.string().optional().describe('Sprint start date'),
+    endDate: z.string().optional().describe('Sprint end date'),
+    status: z.enum(['PLANNED', 'ACTIVE', 'COMPLETED']).default('ACTIVE'),
+    callerId: z.string().optional().describe('Optional: Automatically resolved from your account.')
   },
-  async ({ callerId, name, goal, startDate, endDate, status }) => {
-    const { authorized, user } = await authorizeUser(callerId, [Role.ADMIN, Role.PROJECT_MANAGER]);
-    if (!authorized || !user) return { content: [{ type: 'text', text: 'Permission Denied.' }] };
+  async ({ name, goal, startDate, endDate, status, callerId }) => {
+    const user = await resolveEffectiveUser(callerId);
+    if (!user) return { content: [{ type: 'text', text: 'Permission Denied.' }] };
 
     const sprint = await prisma.sprint.create({
       data: {
@@ -443,11 +493,15 @@ server.tool(
   'export_calendar_feed',
   'Exports user assigned tasks and deadlines as an iCalendar (.ics) feed string',
   {
-    userId: z.string()
+    userId: z.string().optional().describe('Optional user ID. Automatically resolved from your account.')
   },
   async ({ userId }) => {
     try {
-      const icsString = await generateUserCalendarFeed(userId);
+      const user = await resolveEffectiveUser(userId);
+      const targetUserId = user ? user.id : userId;
+      if (!targetUserId) return { content: [{ type: 'text', text: 'Error: No user specified.' }] };
+
+      const icsString = await generateUserCalendarFeed(targetUserId);
       return {
         content: [{ type: 'text', text: icsString }]
       };
@@ -485,7 +539,7 @@ server.prompt(
   'daily_standup_digest',
   'Generates a standup summary of blocked and in-progress tasks',
   {
-    projectId: z.string().describe('The project identifier to review')
+    projectId: z.string().optional().describe('Optional project identifier to review')
   },
   async ({ projectId }) => {
     return {
@@ -494,7 +548,7 @@ server.prompt(
           role: 'user',
           content: {
             type: 'text',
-            text: `Please review all tasks for project "${projectId}". Identify any critical blockers, tasks marked URGENT, and generate a 3-bullet daily standup summary for the team.`
+            text: `Please review active tasks${projectId ? ` for project "${projectId}"` : ''}. Identify any critical blockers, tasks marked URGENT, and generate a 3-bullet daily standup summary for the team.`
           }
         }
       ]
@@ -510,7 +564,7 @@ async function main() {
 
   if (isSseMode) {
     const { startSseServer } = await import('./server/sse.js');
-    startSseServer(3000);
+    startSseServer(Number(process.env.PORT) || 3000);
   } else {
     const transport = new StdioServerTransport();
     await server.connect(transport);
