@@ -507,10 +507,12 @@ app.post('/api/v1/auth/keys', async (req: Request, res: Response) => {
 
 app.get('/mcp/sse', async (req: Request, res: Response) => {
   const authHeader = req.headers.authorization;
-  const rawKey = authHeader?.startsWith('Bearer ') ? authHeader.substring(7) : (req.query.apiKey as string);
+  const rawKey = authHeader?.startsWith('Bearer ')
+    ? authHeader.substring(7).trim()
+    : ((req.query.apiKey as string) || (req.query.key as string) || (req.query.token as string));
 
   if (!rawKey) {
-    return res.status(401).json({ error: 'Unauthorized: Missing API Key (Authorization: Bearer tf_live_...)' });
+    return res.status(401).json({ error: 'Unauthorized: Missing API Key (Authorization: Bearer tf_live_... or ?apiKey=tf_live_...)' });
   }
 
   const authContext = await validateApiKey(rawKey);
@@ -529,7 +531,7 @@ app.get('/mcp/sse', async (req: Request, res: Response) => {
 });
 
 app.post('/mcp/messages', async (req: Request, res: Response) => {
-  const sessionId = req.query.sessionId as string;
+  const sessionId = (req.query.sessionId as string) || (req.headers['x-session-id'] as string);
   if (!sessionId) {
     return res.status(400).json({ error: 'Missing sessionId query parameter' });
   }
@@ -539,7 +541,7 @@ app.post('/mcp/messages', async (req: Request, res: Response) => {
     return res.status(404).json({ error: 'Session not found or expired' });
   }
 
-  await transport.handlePostMessage(req, res);
+  await transport.handlePostMessage(req, res, req.body);
 });
 
 // React Router SPA fallback (all non-API routes serve index.html)
