@@ -4,7 +4,7 @@ import path from 'path';
 import fs from 'fs';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import { validateApiKey, createApiKey } from '../auth/apiKey.js';
-import { server } from '../index.js';
+import { createMcpServer } from '../index.js';
 import { prisma } from '../db.js';
 import { transitionTaskStatus } from '../stateMachine.js';
 import { registerLiveWebClient, eventBus } from '../eventBus.js';
@@ -24,38 +24,6 @@ const possibleFrontendPaths = [
 
 let activeFrontendDir = possibleFrontendPaths.find(p => fs.existsSync(p)) || path.join(process.cwd(), 'public');
 app.use(express.static(activeFrontendDir));
-
-// Custom Cloud SSE Transport that preserves the full absolute URL for remote IDE clients
-class CloudSSEServerTransport extends SSEServerTransport {
-  private _fullOrigin: string;
-  private _httpRes: Response;
-
-  constructor(endpoint: string, res: Response, fullOrigin: string) {
-    super(endpoint, res);
-    this._fullOrigin = fullOrigin;
-    this._httpRes = res;
-  }
-
-  async start() {
-    if ((this as any)._sseResponse) {
-      throw new Error('SSEServerTransport already started!');
-    }
-    this._httpRes.writeHead(200, {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache, no-transform',
-      Connection: 'keep-alive',
-      'Access-Control-Allow-Origin': '*'
-    });
-
-    const fullEndpointUrl = `${this._fullOrigin}/mcp/messages?sessionId=${this.sessionId}`;
-    this._httpRes.write(`event: endpoint\ndata: ${fullEndpointUrl}\n\n`);
-    (this as any)._sseResponse = this._httpRes;
-    this._httpRes.on('close', () => {
-      (this as any)._sseResponse = undefined;
-      this.onclose?.();
-    });
-  }
-}
 
 // Map to track active SSE transports by sessionId
 const transports = new Map<string, SSEServerTransport>();
@@ -513,19 +481,16 @@ app.get('/mcp/sse', async (req: Request, res: Response) => {
     return res.status(403).json({ error: 'Forbidden: Invalid or expired API Key' });
   }
 
-  const host = req.headers['x-forwarded-host'] || req.headers.host;
-  const proto = req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http');
-  const fullOrigin = host ? `${proto}://${host}` : 'http://localhost:3000';
-  const endpoint = `${fullOrigin}/mcp/messages`;
-
-  const transport = new CloudSSEServerTransport(endpoint, res, fullOrigin);
+  const transport = new SSEServerTransport('/mcp/messages', res);
   transports.set(transport.sessionId, transport);
+
+  const mcpServer = createMcpServer();
+  await mcpServer.connect(transport);
 
   transport.onclose = () => {
     transports.delete(transport.sessionId);
+    mcpServer.close().catch(() => {});
   };
-
-  await server.connect(transport);
 });
 
 app.post('/mcp/messages', async (req: Request, res: Response) => {
