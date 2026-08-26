@@ -1,6 +1,7 @@
 import { EventEmitter } from 'events';
 import { prisma } from './db.js';
 import type { Response } from 'express';
+import { dispatchWebhookEvent } from './webhooks/dispatcher.js';
 
 class ProjectEventBus extends EventEmitter {}
 export const eventBus = new ProjectEventBus();
@@ -26,43 +27,20 @@ export function broadcastLiveEvent(eventType: string, data: any) {
   }
 }
 
-/**
- * Dispatches an event payload to registered active organization webhooks (e.g. Slack, Discord).
- */
-async function dispatchWebhooks(organizationId: string, eventType: string, payload: any) {
-  try {
-    const webhooks = await prisma.webhook.findMany({
-      where: { organizationId, active: true }
-    });
-
-    for (const webhook of webhooks) {
-      fetch(webhook.url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          event: eventType,
-          timestamp: new Date().toISOString(),
-          data: payload,
-        })
-      }).catch(err => {
-        console.error(`Failed to dispatch webhook to ${webhook.url}:`, err.message);
-      });
-    }
-  } catch (err: any) {
-    console.error('Error fetching webhooks:', err.message);
-  }
-}
-
 // Listen for Task Created Event
 eventBus.on('TASK_CREATED', async ({ task, organizationId }) => {
   broadcastLiveEvent('TASK_CREATED', task);
-  dispatchWebhooks(organizationId, 'task.created', task);
+  if (organizationId) {
+    dispatchWebhookEvent('TASK_CREATED', task, organizationId);
+  }
 });
 
 // Listen for Task Status Changed Event
 eventBus.on('TASK_STATUS_CHANGED', async ({ taskId, oldStatus, newStatus, task, organizationId }) => {
   broadcastLiveEvent('TASK_STATUS_CHANGED', { taskId, oldStatus, newStatus, task });
-  dispatchWebhooks(organizationId, 'task.status_changed', { taskId, oldStatus, newStatus });
+  if (organizationId) {
+    dispatchWebhookEvent('TASK_STATUS_UPDATED', { taskId, oldStatus, newStatus, task }, organizationId);
+  }
 });
 
 // Listen for Task Assigned Event
@@ -72,20 +50,18 @@ eventBus.on('TASK_ASSIGNED', async ({ taskId, taskTitle, assigneeId, organizatio
   await prisma.notification.create({
     data: {
       userId: assigneeId,
-      organizationId,
       message: `You were assigned to task "${taskTitle}" (${taskId}).`
     }
   }).catch(() => {});
 
   broadcastLiveEvent('TASK_ASSIGNED', { taskId, taskTitle, assigneeId });
-  dispatchWebhooks(organizationId, 'task.assigned', { taskId, taskTitle, assigneeId });
+  dispatchWebhookEvent('TASK_ASSIGNED', { taskId, taskTitle, assigneeId }, organizationId);
 });
 
 // Listen for Blocker Alert
 eventBus.on('TASK_BLOCKED', async ({ taskId, taskTitle, organizationId, blockerIds }) => {
   if (!organizationId) return;
 
-  // Notify all Admins and Managers in this organization
   const managers = await prisma.user.findMany({
     where: {
       organizationId,
@@ -97,18 +73,34 @@ eventBus.on('TASK_BLOCKED', async ({ taskId, taskTitle, organizationId, blockerI
     await prisma.notification.create({
       data: {
         userId: manager.id,
-        organizationId,
         message: `ALERT: Task "${taskTitle}" (${taskId}) is BLOCKED by prerequisite(s): [${blockerIds.join(', ')}].`
       }
     }).catch(() => {});
   }
 
   broadcastLiveEvent('TASK_BLOCKED', { taskId, taskTitle, blockerIds });
-  dispatchWebhooks(organizationId, 'task.blocked', { taskId, taskTitle, blockerIds });
+  dispatchWebhookEvent('TASK_BLOCKED', { taskId, taskTitle, blockerIds }, organizationId);
+});
+
+// Listen for Task Unblocked Event
+eventBus.on('TASK_UNBLOCKED', async ({ taskId, taskTitle, organizationId }) => {
+  if (!organizationId) return;
+  broadcastLiveEvent('TASK_UNBLOCKED', { taskId, taskTitle });
+  dispatchWebhookEvent('TASK_UNBLOCKED', { taskId, taskTitle }, organizationId);
 });
 
 // Listen for Comment Added
 eventBus.on('COMMENT_ADDED', async ({ taskId, comment, organizationId }) => {
   broadcastLiveEvent('COMMENT_ADDED', { taskId, comment });
-  dispatchWebhooks(organizationId, 'comment.added', { taskId, comment });
+  if (organizationId) {
+    dispatchWebhookEvent('COMMENT_ADDED', { taskId, comment }, organizationId);
+  }
+});
+
+// Listen for Epic Decomposed
+eventBus.on('EPIC_DECOMPOSED', async ({ epicTitle, subtasksCount, organizationId, tasks }) => {
+  broadcastLiveEvent('EPIC_DECOMPOSED', { epicTitle, subtasksCount, tasks });
+  if (organizationId) {
+    dispatchWebhookEvent('EPIC_DECOMPOSED', { epicTitle, subtasksCount, tasks }, organizationId);
+  }
 });

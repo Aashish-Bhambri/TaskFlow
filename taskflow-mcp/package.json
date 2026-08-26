@@ -8,7 +8,7 @@
     "start:sse": "tsx src/index.ts --sse",
     "db:seed": "tsx prisma/seed.ts",
     "db:generate": "prisma generate",
-    "test": "tsx tests/saasCore.test.ts"
+    "test": "tsx tests/saasCore.test.ts && tsx tests/mcpAdvanced.test.ts"
   },
   "keywords": [],
   "author": "",

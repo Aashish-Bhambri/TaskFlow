@@ -30,6 +30,12 @@ enum Role {
   VIEWER
 }
 
+enum ActorType {
+  HUMAN
+  AI_AGENT
+  SYSTEM
+}
+
 model Organization {
   id          String      @id @default(uuid())
   name        String
@@ -240,6 +246,8 @@ model ActivityLog {
   id        String    @id @default(uuid())
   action    String
   details   String?
+  actorType ActorType @default(HUMAN)
+  actorName String?
   taskId    String
   task      Task      @relation(fields: [taskId], references: [id], onDelete: Cascade)
   userId    String

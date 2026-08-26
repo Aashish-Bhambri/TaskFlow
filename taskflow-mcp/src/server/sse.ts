@@ -9,7 +9,7 @@ import { prisma } from '../db.js';
 import { transitionTaskStatus } from '../stateMachine.js';
 import { registerLiveWebClient, eventBus } from '../eventBus.js';
 import { generateUserCalendarFeed } from '../calendar.js';
-import { TaskStatus, Priority, TaskType, Role } from '@prisma/client';
+import { TaskStatus, Priority, TaskType, Role, ActorType } from '@prisma/client';
 
 const app = express();
 app.use(cors());
@@ -440,6 +440,147 @@ const sseHandler = (req: Request, res: Response) => {
 
 app.get('/api/v1/events/stream', sseHandler);
 app.get('/api/v1/events/live', sseHandler);
+
+// =========================================================================
+// WEBHOOKS & CI/CD GITHUB INTEGRATION ENDPOINTS
+// =========================================================================
+
+app.get('/api/v1/webhooks', async (req: Request, res: Response) => {
+  try {
+    const ctx = await getUserContext(req);
+    if (!ctx) return res.json([]);
+    const webhooks = await prisma.webhook.findMany({
+      where: { organizationId: ctx.org.id },
+      orderBy: { createdAt: 'desc' }
+    });
+    res.json(webhooks);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/v1/webhooks', async (req: Request, res: Response) => {
+  try {
+    const ctx = await getUserContext(req);
+    if (!ctx) return res.status(401).json({ error: 'Unauthorized' });
+
+    const { url, events, secret } = req.body;
+    if (!url) return res.status(400).json({ error: 'Webhook URL is required' });
+
+    const webhook = await prisma.webhook.create({
+      data: {
+        url,
+        events: events || ['*'],
+        secret: secret || undefined,
+        organizationId: ctx.org.id,
+        active: true
+      }
+    });
+
+    res.status(201).json(webhook);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/v1/webhooks/:id', async (req: Request, res: Response) => {
+  try {
+    const ctx = await getUserContext(req);
+    if (!ctx) return res.status(401).json({ error: 'Unauthorized' });
+
+    const id = req.params.id as string;
+    await prisma.webhook.deleteMany({
+      where: { id, organizationId: ctx.org.id }
+    });
+
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GitHub CI/CD Webhook Ingestion (Automated Ticket Transitions from Git Commits / PRs)
+app.post('/api/v1/integrations/github/webhook', async (req: Request, res: Response) => {
+  try {
+    const event = req.headers['x-github-event'] as string;
+    const body = req.body;
+    const matchedTasks: Array<{ id: string; action: string }> = [];
+
+    // Case 1: Push Event (Commit messages with "Fixes TF-123" or "Closes #...")
+    if (event === 'push' && Array.isArray(body.commits)) {
+      for (const commit of body.commits) {
+        const msg: string = commit.message || '';
+        const matches = msg.match(/(?:fix|fixes|close|closes|resolve|resolves)\s+(?:#|TF-)?([a-zA-Z0-9-]+)/gi);
+        if (matches) {
+          for (const m of matches) {
+            const taskId = m.replace(/(?:fix|fixes|close|closes|resolve|resolves)\s+(?:#|TF-)?/i, '').trim();
+            const task = await prisma.task.findFirst({
+              where: {
+                OR: [{ id: taskId }, { id: { startsWith: taskId } }]
+              }
+            });
+            if (task && task.status !== TaskStatus.DONE) {
+              await transitionTaskStatus(
+                task.id,
+                TaskStatus.DONE,
+                task.organizationId,
+                task.createdById,
+                ActorType.SYSTEM,
+                `GitHub Actions Bot (Commit ${commit.id.substring(0, 7)})`
+              );
+              matchedTasks.push({ id: task.id, action: 'MOVED_TO_DONE' });
+            }
+          }
+        }
+      }
+    }
+
+    // Case 2: Pull Request Event (Opened / Closed / Merged)
+    if (event === 'pull_request') {
+      const pr = body.pull_request;
+      const prAction = body.action;
+      const prBody = (pr?.body || '') + ' ' + (pr?.title || '');
+      const matches = prBody.match(/(?:fix|fixes|close|closes|resolve|resolves)\s+(?:#|TF-)?([a-zA-Z0-9-]+)/gi);
+      if (matches) {
+        for (const m of matches) {
+          const taskId = m.replace(/(?:fix|fixes|close|closes|resolve|resolves)\s+(?:#|TF-)?/i, '').trim();
+          const task = await prisma.task.findFirst({
+            where: {
+              OR: [{ id: taskId }, { id: { startsWith: taskId } }]
+            }
+          });
+          if (task) {
+            if (prAction === 'opened' && task.status !== TaskStatus.REVIEW) {
+              await transitionTaskStatus(
+                task.id,
+                TaskStatus.REVIEW,
+                task.organizationId,
+                task.createdById,
+                ActorType.SYSTEM,
+                `GitHub PR #${pr.number} Opened`
+              );
+              matchedTasks.push({ id: task.id, action: 'MOVED_TO_REVIEW' });
+            } else if (prAction === 'closed' && pr.merged && task.status !== TaskStatus.DONE) {
+              await transitionTaskStatus(
+                task.id,
+                TaskStatus.DONE,
+                task.organizationId,
+                task.createdById,
+                ActorType.SYSTEM,
+                `GitHub PR #${pr.number} Merged`
+              );
+              matchedTasks.push({ id: task.id, action: 'MOVED_TO_DONE' });
+            }
+          }
+        }
+      }
+    }
+
+    res.json({ success: true, event, processedTasks: matchedTasks });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // =========================================================================
 // REMOTE MCP SSE ENDPOINTS (For AI Clients & Remote Agents)

@@ -1,4 +1,4 @@
-import { TaskStatus } from '@prisma/client';
+import { TaskStatus, ActorType } from '@prisma/client';
 import { prisma } from './db.js';
 import { eventBus } from './eventBus.js';
 
@@ -15,7 +15,9 @@ export async function transitionTaskStatus(
   taskId: string,
   targetStatus: TaskStatus,
   organizationId?: string,
-  userId?: string
+  userId?: string,
+  actorType: ActorType = ActorType.HUMAN,
+  actorName?: string
 ) {
   const task = await prisma.task.findFirst({
     where: {
@@ -77,13 +79,15 @@ export async function transitionTaskStatus(
     }
   });
 
-  // 4. Record Activity Log
+  // 4. Record Activity Log with Actor Attribution (Human vs AI vs System)
   if (userId) {
     await prisma.activityLog.create({
       data: {
         taskId,
         userId,
         action: 'STATUS_CHANGED',
+        actorType,
+        actorName: actorName || (actorType === ActorType.AI_AGENT ? 'AI Assistant' : undefined),
         details: `Moved from ${oldStatus} to ${targetStatus}`
       }
     }).catch(() => {});
@@ -97,6 +101,45 @@ export async function transitionTaskStatus(
     task: updatedTask,
     organizationId: task.organizationId
   });
+
+  // 6. Automatic Cascade Unblock: If a task becomes DONE, check all tasks blocked by this task
+  if (targetStatus === TaskStatus.DONE) {
+    const blockedDependents = await prisma.taskDependency.findMany({
+      where: { dependsOnTaskId: taskId },
+      include: {
+        task: {
+          include: {
+            dependencies: {
+              include: { dependsOnTask: true }
+            }
+          }
+        }
+      }
+    });
+
+    for (const dep of blockedDependents) {
+      const dependentTask = dep.task;
+      if (dependentTask.status === TaskStatus.BLOCKED) {
+        // Check if all other prerequisites are now DONE
+        const remainingBlockers = dependentTask.dependencies.filter(
+          d => d.dependsOnTaskId !== taskId && d.dependsOnTask.status !== TaskStatus.DONE
+        );
+
+        if (remainingBlockers.length === 0) {
+          await prisma.task.update({
+            where: { id: dependentTask.id },
+            data: { status: TaskStatus.TODO }
+          });
+
+          eventBus.emit('TASK_UNBLOCKED', {
+            taskId: dependentTask.id,
+            taskTitle: dependentTask.title,
+            organizationId: dependentTask.organizationId
+          });
+        }
+      }
+    }
+  }
 
   return updatedTask;
 }

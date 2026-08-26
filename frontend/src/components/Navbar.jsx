@@ -8,6 +8,7 @@ import {
   Moon,
   Command,
   Key,
+  Webhook,
 } from 'lucide-react';
 import {
   Show,
@@ -16,10 +17,12 @@ import {
   AppUserButton,
 } from './ClerkAuthAdapter';
 import DeveloperApiKeysDialog from './DeveloperApiKeysDialog';
+import { WebhooksDialog } from './WebhooksDialog';
 
 export default function Navbar({ onToggleMobileSidebar, onSearchQuery }) {
   const [query, setQuery] = useState('');
   const [isKeysOpen, setIsKeysOpen] = useState(false);
+  const [isWebhooksOpen, setIsWebhooksOpen] = useState(false);
   const searchInputRef = useRef(null);
   const dispatch = useDispatch();
   const theme = useSelector((state) => state.theme.theme);
@@ -73,10 +76,20 @@ export default function Navbar({ onToggleMobileSidebar, onSearchQuery }) {
           </div>
         </div>
 
-        {/* Right: Connect AI, Theme Toggle & Clerk Authentication */}
+        {/* Right: Webhooks, Connect AI, Theme Toggle & Clerk Authentication */}
         <div className="flex items-center space-x-2.5 ml-4">
-          {/* Connect AI / API Keys Button */}
           <Show when="signed-in">
+            {/* Webhooks & Integrations Button */}
+            <button
+              onClick={() => setIsWebhooksOpen(true)}
+              className="flex items-center space-x-1.5 px-2.5 py-1.5 rounded-xl bg-violet-50 hover:bg-violet-100 dark:bg-violet-950/50 dark:hover:bg-violet-900/60 text-violet-700 dark:text-violet-300 text-xs font-semibold border border-violet-200/80 dark:border-violet-800/60 transition cursor-pointer shadow-xs"
+              title="Webhooks, Slack, Discord & GitHub Actions"
+            >
+              <Webhook className="w-3.5 h-3.5" />
+              <span className="hidden md:inline">Integrations</span>
+            </button>
+
+            {/* Connect AI / API Keys Button */}
             <button
               onClick={() => setIsKeysOpen(true)}
               className="flex items-center space-x-1.5 px-2.5 py-1.5 rounded-xl bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-950/50 dark:hover:bg-indigo-900/60 text-indigo-700 dark:text-indigo-300 text-xs font-semibold border border-indigo-200/80 dark:border-indigo-800/60 transition cursor-pointer shadow-xs"
@@ -116,6 +129,9 @@ export default function Navbar({ onToggleMobileSidebar, onSearchQuery }) {
 
       {/* Developer API Keys Modal */}
       {isKeysOpen && <DeveloperApiKeysDialog onClose={() => setIsKeysOpen(false)} />}
+
+      {/* Webhooks & Integrations Modal */}
+      {isWebhooksOpen && <WebhooksDialog isOpen={isWebhooksOpen} onClose={() => setIsWebhooksOpen(false)} />}
     </>
   );
 }
