@@ -26,13 +26,22 @@ export async function createApiKey(organizationId: string, userId?: string, name
   const keyHash = hashApiKey(apiKey);
   const prefix = apiKey.substring(0, 12) + '...';
 
+  // Verify that userId actually exists in database before setting foreign key
+  let validUserId: string | undefined = undefined;
+  if (userId) {
+    const existingUser = await prisma.user.findUnique({ where: { id: userId } });
+    if (existingUser) {
+      validUserId = existingUser.id;
+    }
+  }
+
   const record = await prisma.apiKey.create({
     data: {
       name,
       keyHash,
       prefix,
       organizationId,
-      userId: userId || undefined
+      userId: validUserId
     }
   });
 

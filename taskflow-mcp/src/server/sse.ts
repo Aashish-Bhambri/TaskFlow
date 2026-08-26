@@ -486,25 +486,19 @@ app.get('/api/v1/events/live', sseHandler);
 
 app.post('/api/v1/auth/keys', async (req: Request, res: Response) => {
   try {
-    let orgId = req.body.organizationId;
-    
-    // If not provided, resolve from user context
-    if (!orgId) {
-      const ctx = await getUserContext(req);
-      if (ctx) orgId = ctx.org.id;
-    }
+    const ctx = await getUserContext(req);
+    const orgId = ctx?.org.id || req.body.organizationId;
+    const userId = ctx?.user.id || req.body.userId;
 
     if (!orgId) {
-      // Default to first org if still null
       const firstOrg = await prisma.organization.findFirst();
-      orgId = firstOrg?.id;
+      if (!firstOrg) return res.status(400).json({ error: 'No organization found' });
+      const result = await createApiKey(firstOrg.id, userId, req.body.name || 'Live AI Agent Key');
+      return res.status(201).json(result);
     }
 
-    if (!orgId) {
-      return res.status(400).json({ error: 'organizationId is required' });
-    }
-
-    const result = await createApiKey(orgId, req.body.name || 'Live AI Agent Key');
+    const keyName = req.body.name || (ctx ? `${ctx.user.name || 'User'} AI Client Key` : 'Live AI Agent Key');
+    const result = await createApiKey(orgId, userId, keyName);
     res.status(201).json(result);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
